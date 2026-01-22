@@ -1,149 +1,177 @@
 const {
-default: makeWASocket,
-useMultiFileAuthState,
-fetchLatestBaileysVersion,
-downloadContentFromMessage
+  default: makeWASocket,
+  useMultiFileAuthState,
+  fetchLatestBaileysVersion,
+  downloadContentFromMessage
 } = require("@whiskeysockets/baileys");
 
 const Pino = require("pino");
+const readline = require("readline");
 const config = require("./config");
 
 let autoTyping = false;
 let antiDelete = false;
 let autoReact = false;
 
+// input for pairing code
+const rl = readline.createInterface({
+  input: process.stdin,
+  output: process.stdout
+});
+
 async function startBot() {
-const { state, saveCreds } = await useMultiFileAuthState("./session");
-const { version } = await fetchLatestBaileysVersion();
+  const { state, saveCreds } = await useMultiFileAuthState("./session");
+  const { version } = await fetchLatestBaileysVersion();
 
-const conn = makeWASocket({
-logger: Pino({ level: "silent" }),
-printQRInTerminal: true,
-auth: state,
-version
-});
+  const conn = makeWASocket({
+    logger: Pino({ level: "silent" }),
+    auth: state,
+    version
+  });
 
-conn.ev.on("creds.update", saveCreds);
+  conn.ev.on("creds.update", saveCreds);
 
-// AUTO VIEW STATUS
-conn.ev.on("messages.upsert", async ({ messages }) => {
-const m = messages[0];
-if (!m.message) return;
+  // 🔐 PAIRING CODE LOGIN
+  if (!state.creds.registered) {
+    rl.question("📞 Enter your WhatsApp number (234XXXXXXXXXX): ", async (number) => {
+      number = number.replace(/[^0-9]/g, "");
+      const code = await conn.requestPairingCode(number);
+      console.log(`\n🔢 PAIRING CODE: ${code}\n`);
+      console.log("📲 Go to WhatsApp > Linked Devices > Link with phone number\n");
+      rl.close();
+    });
+  }
 
-if (autoTyping) {
-await conn.sendPresenceUpdate("composing", m.key.remoteJid);
-}
+  // ================= MESSAGE HANDLER =================
+  conn.ev.on("messages.upsert", async ({ messages }) => {
+    const m = messages[0];
+    if (!m.message) return;
 
-if (m.key.remoteJid === "status@broadcast") {
-await conn.readMessages([m.key]);
-}
+    const chat = m.key.remoteJid;
+    const sender = m.key.participant || chat;
+    const isGroup = chat.endsWith("@g.us");
 
-if (autoReact && m.key.remoteJid.endsWith("@g.us")) {
-await conn.sendMessage(m.key.remoteJid, {
-react: { text: "🔥", key: m.key }
-});
-}
+    // AUTO VIEW STATUS
+    if (chat === "status@broadcast") {
+      await conn.readMessages([m.key]);
+      return;
+    }
 
-if (antiDelete && m.message?.protocolMessage?.type === 0) {
-const msg = m.message.protocolMessage;
-await conn.sendMessage(m.key.remoteJid, {
-text: "⚠️ *Anti Delete Triggered*\nA message was deleted."
-});
-}
+    // AUTO TYPING
+    if (autoTyping) {
+      await conn.sendPresenceUpdate("composing", chat);
+    }
 
-const body =
-m.message.conversation ||
-m.message.extendedTextMessage?.text ||
-"";
+    // AUTO REACT
+    if (autoReact && isGroup) {
+      await conn.sendMessage(chat, {
+        react: { text: "🔥", key: m.key }
+      });
+    }
 
-if (!body.startsWith(config.prefix)) return;
+    // ANTI DELETE
+    if (antiDelete && m.message?.protocolMessage?.type === 0) {
+      await conn.sendMessage(chat, {
+        text: "⚠️ *Anti Delete*\nA message was deleted."
+      });
+    }
 
-const args = body.slice(1).trim().split(/ +/);
-const command = args.shift().toLowerCase();
-const sender = m.key.participant || m.key.remoteJid;
-const isOwner = config.ownerNumber.some(v => sender.includes(v));
+    const body =
+      m.message.conversation ||
+      m.message.extendedTextMessage?.text ||
+      "";
 
-// ================= COMMANDS =================
+    if (!body.startsWith(config.prefix)) return;
 
-switch (command) {
+    const args = body.slice(1).trim().split(/ +/);
+    const command = args.shift().toLowerCase();
+    const isOwner = config.ownerNumber.some(v => sender.includes(v));
 
-case "ping":
-await conn.sendMessage(m.key.remoteJid, { text: "🏓 Pong!" });
-break;
+    // ================= COMMANDS =================
 
-case "alive":
-await conn.sendMessage(m.key.remoteJid, {
-text: `✅ *${config.botName} is Alive*\nOwner: ${config.ownerName}\nSupport:\n${config.support}`
-});
-break;
+    switch (command) {
 
-case "owner":
-await conn.sendMessage(m.key.remoteJid, {
-text: `👑 Owner: ${config.ownerName}\n📞 +2348062641931`
-});
-break;
+      case "ping":
+        await conn.sendMessage(chat, { text: "🏓 Pong!" });
+        break;
 
-case "repo":
-await conn.sendMessage(m.key.remoteJid, {
-text: `📦 Repo & Support:\n${config.support}`
-});
-break;
+      case "alive":
+        await conn.sendMessage(chat, {
+          text: `✅ *${config.botName} is Alive*\n👑 Owner: ${config.ownerName}\n🔗 Support:\n${config.support}`
+        });
+        break;
 
-case "autotyping":
-if (!isOwner) return;
-autoTyping = args[0] === "on";
-await conn.sendMessage(m.key.remoteJid, { text: `✅ AutoTyping ${args[0]}` });
-break;
+      case "owner":
+        await conn.sendMessage(chat, {
+          text: `👑 Owner: ${config.ownerName}\n📞 +2348062641931`
+        });
+        break;
 
-case "antidelete":
-if (!isOwner) return;
-antiDelete = args[0] === "on";
-await conn.sendMessage(m.key.remoteJid, { text: `✅ AntiDelete ${args[0]}` });
-break;
+      case "repo":
+        await conn.sendMessage(chat, {
+          text: `📦 Repo & Support:\n${config.support}`
+        });
+        break;
 
-case "autoreact":
-if (!isOwner) return;
-autoReact = args[0] === "on";
-await conn.sendMessage(m.key.remoteJid, { text: `✅ AutoReact ${args[0]}` });
-break;
+      case "autotyping":
+        if (!isOwner) return;
+        autoTyping = args[0] === "on";
+        await conn.sendMessage(chat, { text: `✅ AutoTyping ${args[0]}` });
+        break;
 
-case "block":
-if (!isOwner) return;
-await conn.updateBlockStatus(args[0] + "@s.whatsapp.net", "block");
-await conn.sendMessage(m.key.remoteJid, { text: "✅ Blocked" });
-break;
+      case "antidelete":
+        if (!isOwner) return;
+        antiDelete = args[0] === "on";
+        await conn.sendMessage(chat, { text: `✅ AntiDelete ${args[0]}` });
+        break;
 
-case "unblock":
-if (!isOwner) return;
-await conn.updateBlockStatus(args[0] + "@s.whatsapp.net", "unblock");
-await conn.sendMessage(m.key.remoteJid, { text: "✅ Unblocked" });
-break;
+      case "autoreact":
+        if (!isOwner) return;
+        autoReact = args[0] === "on";
+        await conn.sendMessage(chat, { text: `✅ AutoReact ${args[0]}` });
+        break;
 
-case "tagall":
-if (!m.key.remoteJid.endsWith("@g.us")) return;
-const metadata = await conn.groupMetadata(m.key.remoteJid);
-const users = metadata.participants.map(v => v.id);
-let text = "*📢 TAG ALL*\n\n";
-users.forEach(u => text += `@${u.split("@")[0]}\n`);
-await conn.sendMessage(m.key.remoteJid, { text, mentions: users });
-break;
+      case "block":
+        if (!isOwner) return;
+        await conn.updateBlockStatus(args[0] + "@s.whatsapp.net", "block");
+        await conn.sendMessage(chat, { text: "✅ Blocked" });
+        break;
 
-case "vv":
-if (!m.message.extendedTextMessage?.contextInfo?.quotedMessage) return;
-let q = m.message.extendedTextMessage.contextInfo.quotedMessage;
-let type = Object.keys(q)[0];
-let stream = await downloadContentFromMessage(q[type], type.includes("video") ? "video" : "image");
-let buffer = Buffer.from([]);
-for await (let chunk of stream) buffer = Buffer.concat([buffer, chunk]);
-await conn.sendMessage(sender, {
-[type.includes("video") ? "video" : "image"]: buffer,
-caption: "✅ View Once Saved"
-});
-break;
+      case "unblock":
+        if (!isOwner) return;
+        await conn.updateBlockStatus(args[0] + "@s.whatsapp.net", "unblock");
+        await conn.sendMessage(chat, { text: "✅ Unblocked" });
+        break;
 
-case "aza":
-await conn.sendMessage(m.key.remoteJid, {
-text: `╭──── ✧ ────╮
+      case "tagall":
+        if (!isGroup) return;
+        const meta = await conn.groupMetadata(chat);
+        const users = meta.participants.map(v => v.id);
+        let txt = "*📢 TAG ALL*\n\n";
+        users.forEach(u => txt += `@${u.split("@")[0]}\n`);
+        await conn.sendMessage(chat, { text: txt, mentions: users });
+        break;
+
+      case "vv":
+        if (!m.message.extendedTextMessage?.contextInfo?.quotedMessage) return;
+        const q = m.message.extendedTextMessage.contextInfo.quotedMessage;
+        const type = Object.keys(q)[0];
+        const stream = await downloadContentFromMessage(
+          q[type],
+          type.includes("video") ? "video" : "image"
+        );
+        let buffer = Buffer.from([]);
+        for await (const chunk of stream) buffer = Buffer.concat([buffer, chunk]);
+
+        await conn.sendMessage(sender, {
+          [type.includes("video") ? "video" : "image"]: buffer,
+          caption: "✅ View Once Saved"
+        });
+        break;
+
+      case "aza":
+        await conn.sendMessage(chat, {
+          text: `╭──── ✧ ────╮
 _PAYMENT_
 
 ✦ Name: ADURAMIGBA
@@ -152,11 +180,10 @@ _PAYMENT_
 
 📩 Screenshot after payment
 ╰──── ✧ ────╯`
-});
-break;
-
-}
-});
+        });
+        break;
+    }
+  });
 }
 
 startBot();
